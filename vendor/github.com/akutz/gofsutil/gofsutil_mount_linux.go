@@ -144,27 +144,11 @@ func (fs *FS) bindMount(
 
 // getMounts returns a slice of all the mounted filesystems
 func (fs *FS) getMounts(ctx context.Context) ([]Info, error) {
-
-	_, hash1, err := fs.readProcMounts(ctx, procMountsPath, false)
+	mps, _, err := fs.readProcMounts(ctx, procMountsPath, true)
 	if err != nil {
 		return nil, err
 	}
-
-	for i := 0; i < procMountsRetries; i++ {
-		mps, hash2, err := fs.readProcMounts(ctx, procMountsPath, true)
-		if err != nil {
-			return nil, err
-		}
-		if hash1 == hash2 {
-			// Success
-			return mps, nil
-		}
-		hash1 = hash2
-		time.Sleep(procMountsRetryDelay)
-	}
-	return nil, fmt.Errorf(
-		"failed to get a consistent snapshot of %v after %d tries",
-		procMountsPath, procMountsRetries)
+	return mps, nil
 }
 
 // readProcMounts reads procMountsInfo and produce a hash
