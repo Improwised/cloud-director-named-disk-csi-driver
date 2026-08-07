@@ -8,12 +8,15 @@ package csi
 import (
 	"context"
 	"fmt"
+	"net"
+	"os"
+	"os/signal"
+	"syscall"
+
 	"github.com/vmware/cloud-director-named-disk-csi-driver/pkg/util"
 	"github.com/vmware/cloud-director-named-disk-csi-driver/pkg/vcdcsiclient"
 	"github.com/vmware/cloud-director-named-disk-csi-driver/version"
 	"github.com/vmware/cloud-provider-for-cloud-director/pkg/vcdsdk"
-	"net"
-	"os"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc"
@@ -241,5 +244,27 @@ func (d *VCDDriver) Run() error {
 // Stop will stop the grpc server
 func (d *VCDDriver) Stop() {
 	klog.Infof("Stopping server")
-	d.srv.Stop()
+	if d.srv != nil {
+		d.srv.Stop()
+	}
+}
+
+// Shutdown performs graceful shutdown: stop gRPC server
+func (d *VCDDriver) Shutdown() {
+	klog.Infof("Shutting down CSI driver: stopping server")
+	d.Stop()
+}
+
+// ShutdownOnSignal listens for SIGTERM/SIGINT and exits immediately.
+// We do NOT call d.srv.Stop() here because GracefulStop() blocks waiting for
+// in-flight RPCs to complete. If an RPC is stuck in kernel I/O (e.g. Statfs
+// on a wedged mount), GracefulStop() hangs forever and the process never
+// exits — causing the pod to stick in Terminating. The kernel will close the
+// gRPC socket on process exit, and kubelet will retry interrupted calls.
+func (d *VCDDriver) ShutdownOnSignal() {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
+	sig := <-sigs
+	klog.Infof("Received signal [%v], exiting immediately", sig)
+	os.Exit(0)
 }

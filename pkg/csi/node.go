@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/akutz/gofsutil"
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -38,6 +39,25 @@ const (
 
 	ScsiBlockPathPrefix = "/sys/class/block"
 	ScsiBlockPathSuffix = "device/rescan"
+
+	// unmountTimeout is the maximum time to wait for a normal (non-lazy) unmount
+	// before falling back to lazy unmount (MNT_DETACH). A normal umount can block
+	// indefinitely in uninterruptible sleep (D-state) if the underlying filesystem
+	// or block device is wedged; lazy unmount always returns immediately.
+	unmountTimeout = 10 * time.Second
+
+	// mountTimeout is the maximum time to wait for a mount/format operation
+	// to complete. Mount operations can block indefinitely in D-state if
+	// the underlying storage block device is wedged.
+	mountTimeout = 20 * time.Second
+
+	// mountinfoRetries is the number of times to retry mount-info operations
+	// that depend on /proc/self/mountinfo. Under concurrent mount operations
+	// (many pods sharing one volume), the mount table changes faster than a
+	// consistent snapshot can be obtained. This retry count gives the table
+	// time to stabilize.
+	mountinfoRetries     = 10
+	mountinfoRetryDelay  = 500 * time.Millisecond
 )
 
 type nodeService struct {
@@ -196,9 +216,46 @@ func (ns *nodeService) NodeStageVolumeFilesystemMount(ctx context.Context, volum
 	}
 	if isMounted {
 		if !isMountedAsExpected {
-			return nil, status.Errorf(codes.Internal,
-				"device [%s] not mounted on [%s] and mode [%s] as expected: [%v]",
-				devicePath, mountDir, mountMode, err)
+			// Device is already active on the host (e.g. held by running pod subpaths after a CSI
+			// daemon restart) but its globalmount staging directory is empty/missing.
+			// FormatAndMount would fail on a busy device, so we find the device's current active
+			// mount point and bind-mount it to the expected staging directory instead.
+			klog.Warningf("Device [%s] is mounted on the host but not at the expected staging dir [%s]. "+
+				"Attempting bind-mount recovery.", devicePath, mountDir)
+
+			var activeMounts []gofsutil.Info
+			getErr := retryOnMountInfoInconsistency(func() error {
+				var innerErr error
+				activeMounts, innerErr = gofsutil.GetDevMounts(ctx, devicePath)
+				return innerErr
+			})
+			if getErr != nil || len(activeMounts) == 0 {
+				return nil, status.Errorf(codes.Internal,
+					"device [%s] reported as mounted but no active mount paths found: [%v]",
+					devicePath, getErr)
+			}
+
+			// Use the first active mount path as the bind-mount source
+			sourcePath := activeMounts[0].Path
+			klog.Infof("Bind-mounting device [%s] from active path [%s] to staging dir [%s]",
+				devicePath, sourcePath, mountDir)
+
+			// Ensure staging directory exists
+			if err := os.MkdirAll(mountDir, 0750); err != nil {
+				return nil, status.Errorf(codes.Internal,
+					"unable to mkdir staging path [%s]: [%v]", mountDir, err)
+			}
+
+			// Bind-mount the active path to the staging directory
+			if bindErr := ns.bindMountWithTimeout(ctx, sourcePath, mountDir, mountMode); bindErr != nil {
+				return nil, status.Errorf(codes.Internal,
+					"bind-mount recovery failed for device [%s] from [%s] to [%s]: [%v]",
+					devicePath, sourcePath, mountDir, bindErr)
+			}
+
+			klog.Infof("Bind-mount recovery succeeded: device [%s] is now staged at [%s]",
+				devicePath, mountDir)
+			return &csi.NodeStageVolumeResponse{}, nil
 		} else {
 			// the device is mounted as expected, so nothing to do
 			klog.Infof("Device [%s] mounted on [%s] with correct mode [%s]",
@@ -225,7 +282,7 @@ func (ns *nodeService) NodeStageVolumeFilesystemMount(ctx context.Context, volum
 	// Mounting as the device is not yet mounted
 	klog.Infof("Mounting device [%s] to folder [%s] of type [%s] with flags [%v]",
 		devicePath, mountDir, fsType, mountFlags)
-	if err = gofsutil.FormatAndMount(ctx, devicePath, mountDir, fsType, mountFlags...); err != nil {
+	if err = ns.formatAndMountWithTimeout(ctx, devicePath, mountDir, fsType, mountFlags...); err != nil {
 		return nil, status.Error(codes.Internal,
 			fmt.Sprintf("unable to format and mount device [%s] at path [%s] with fs [%s] and flags [%v]: [%v]",
 				devicePath, mountDir, fsType, mountFlags, err))
@@ -310,7 +367,7 @@ func (ns *nodeService) NodeUnstageVolume(ctx context.Context,
 
 	// the directory exists and is mounted, so unmount
 	klog.Infof("Attempting to unmount path [%s].", mountDir)
-	if err = gofsutil.Unmount(ctx, mountDir); err != nil {
+	if err = ns.unmountWithLazyFallback(ctx, mountDir); err != nil {
 		return nil, status.Errorf(codes.Internal, "unable to unmount [%s]: [%v", mountDir, err)
 	}
 
@@ -469,7 +526,7 @@ func (ns *nodeService) NodePublishVolume(ctx context.Context,
 	mountFlags := append(mnt.GetMountFlags(), mountMode)
 	klog.Infof("Mounting dir [%s] to folder [%s] with flags [%v]",
 		hostMountPath, podMountPath, mountFlags)
-	if err = gofsutil.BindMount(ctx, hostMountPath, podMountPath, mountFlags...); err != nil {
+	if err = ns.bindMountWithTimeout(ctx, hostMountPath, podMountPath, mountFlags...); err != nil {
 		return nil, status.Errorf(codes.Internal,
 			"unable to format and mount path [%s] at path [%s] with flags [%v]: [%v]",
 			hostMountPath, podMountPath, mountFlags, err)
@@ -512,7 +569,7 @@ func (ns *nodeService) NodeUnpublishVolume(ctx context.Context,
 
 	klog.Infof("Attempting to unmount pod mount dir [%s].", podMountPath)
 	if isDirMounted {
-		if err = gofsutil.Unmount(ctx, podMountPath); err != nil {
+		if err = ns.unmountWithLazyFallback(ctx, podMountPath); err != nil {
 			return nil, fmt.Errorf("unable to unmount pod mount dir [%s]: [%v]", podMountPath, err)
 		}
 	}
@@ -543,7 +600,7 @@ func (ns *nodeService) NodeGetInfo(_ context.Context, _ *csi.NodeGetInfoRequest)
 
 }
 
-func (ns *nodeService) NodeGetVolumeStats(_ context.Context,
+func (ns *nodeService) NodeGetVolumeStats(ctx context.Context,
 	req *csi.NodeGetVolumeStatsRequest) (*csi.NodeGetVolumeStatsResponse, error) {
 
 	klog.Infof("NodeGetVolumeStats called with req: %#v", req)
@@ -555,9 +612,53 @@ func (ns *nodeService) NodeGetVolumeStats(_ context.Context,
 	}
 
 	var statFS unix.Statfs_t
-	if err := unix.Statfs(volumePath, &statFS); err != nil {
-		klog.Errorf("unable to get stats of volume [%s]: [%v]", volumePath, err)
-		return nil, fmt.Errorf("unable to get stats of volume [%s]: [%v]", volumePath, err)
+	statDone := make(chan error, 1)
+	go func() {
+		statDone <- unix.Statfs(volumePath, &statFS)
+	}()
+
+	select {
+	case err := <-statDone:
+		if err != nil {
+			klog.Errorf("unable to get stats of volume [%s]: [%v]", volumePath, err)
+			return nil, fmt.Errorf("unable to get stats of volume [%s]: [%v]", volumePath, err)
+		}
+	case <-time.After(5 * time.Second):
+		klog.Warningf("statfs timed out after 5s for volume [%s], returning empty stats", volumePath)
+		return &csi.NodeGetVolumeStatsResponse{
+			Usage: []*csi.VolumeUsage{
+				{
+					Available: 0,
+					Total:     0,
+					Used:      0,
+					Unit:      csi.VolumeUsage_BYTES,
+				},
+				{
+					Available: 0,
+					Total:     0,
+					Used:      0,
+					Unit:      csi.VolumeUsage_INODES,
+				},
+			},
+		}, nil
+	case <-ctx.Done():
+		klog.Warningf("context cancelled for volume [%s], returning empty stats", volumePath)
+		return &csi.NodeGetVolumeStatsResponse{
+			Usage: []*csi.VolumeUsage{
+				{
+					Available: 0,
+					Total:     0,
+					Used:      0,
+					Unit:      csi.VolumeUsage_BYTES,
+				},
+				{
+					Available: 0,
+					Total:     0,
+					Used:      0,
+					Unit:      csi.VolumeUsage_INODES,
+				},
+			},
+		}, nil
 	}
 
 	return &csi.NodeGetVolumeStatsResponse{
@@ -692,7 +793,7 @@ func (ns *nodeService) rescanDiskInVM(_ context.Context) error {
 // getDiskPath looks for a device corresponding to vmName:diskName as stored in vSphere. It
 // enumerates devices in /dev/disk/by-path and returns a device with UUID matching the scsi UUID.
 // It needs disk.enableUUID to be set for the VM.
-func (ns *nodeService) getDiskPath(_ context.Context, vmFullName string, diskUUID string) (string, error) {
+func (ns *nodeService) getDiskPath(ctx context.Context, vmFullName string, diskUUID string) (string, error) {
 
 	if diskUUID == "" {
 		return "", fmt.Errorf("diskUUID should not be an empty string")
@@ -726,11 +827,14 @@ func (ns *nodeService) getDiskPath(_ context.Context, vmFullName string, diskUUI
 		}
 
 		klog.Infof("Checking file: [%s] => [%s]\n", path, fileToProcess)
-		outBytes, err := exec.Command(
+		scsiCtx, scsiCancel := context.WithTimeout(ctx, 3*time.Second)
+		outBytes, err := exec.CommandContext(
+			scsiCtx,
 			"/lib/udev/scsi_id",
 			"--page=0x83",
 			"--whitelisted",
 			fmt.Sprintf("--device=%v", fileToProcess)).CombinedOutput()
+		scsiCancel()
 		if err != nil {
 			klog.Infof("Encountered error while processing file [%s]: [%v]", fileToProcess, err)
 			klog.Infof("Please check if the `disk.enableUUID` parameter is set to 1 for the VM in VC config.")
@@ -765,11 +869,35 @@ func (ns *nodeService) isVolumeReadOnly(capability *csi.VolumeCapability) bool {
 		accessMode == csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY
 }
 
+// retryOnMountInfoInconsistency retries the given function when it returns an error
+// containing "failed to get a consistent snapshot". This helps when the mount table
+// is in flux due to concurrent mount operations on shared volumes.
+func retryOnMountInfoInconsistency(fn func() error) error {
+	var lastErr error
+	for i := 0; i < mountinfoRetries; i++ {
+		lastErr = fn()
+		if lastErr == nil {
+			return nil
+		}
+		if strings.Contains(lastErr.Error(), "failed to get a consistent snapshot") {
+			time.Sleep(mountinfoRetryDelay)
+			continue
+		}
+		return lastErr
+	}
+	return lastErr
+}
+
 // returns isMounted, isMountedAsExpected, error in checking
 func (ns *nodeService) isVolumeMountedAsExpected(ctx context.Context, devicePath string, mountDir string,
 	mountMode string) (bool, bool, error) {
 
-	mountedDevs, err := gofsutil.GetDevMounts(ctx, devicePath)
+	var mountedDevs []gofsutil.Info
+	err := retryOnMountInfoInconsistency(func() error {
+		var innerErr error
+		mountedDevs, innerErr = gofsutil.GetDevMounts(ctx, devicePath)
+		return innerErr
+	})
 	if err != nil {
 		return false, false, fmt.Errorf("unable to check if [%s] is mounted: [%v]", devicePath, err)
 	}
@@ -829,7 +957,12 @@ func (ns *nodeService) checkIfPathExists(path string) (bool, error) {
 }
 
 func (ns *nodeService) checkIfPathMounted(ctx context.Context, mountDir string) (bool, error) {
-	mountDevices, err := gofsutil.GetMounts(ctx)
+	var mountDevices []gofsutil.Info
+	err := retryOnMountInfoInconsistency(func() error {
+		var innerErr error
+		mountDevices, innerErr = gofsutil.GetMounts(ctx)
+		return innerErr
+	})
 	if err != nil {
 		return false, fmt.Errorf("unable to get mounts of node")
 	}
@@ -878,3 +1011,79 @@ func (ns *nodeService) rmdir(path string) error {
 	}
 	return err
 }
+
+// unmountWithLazyFallback tries a normal unmount with a timeout; if it does not
+// complete within unmountTimeout, it falls back to a lazy unmount (MNT_DETACH)
+// which never blocks in uninterruptible I/O sleep. This prevents pod
+// termination from hanging indefinitely when the underlying filesystem or
+// block device is wedged.
+func (ns *nodeService) unmountWithLazyFallback(ctx context.Context, mountPath string) error {
+	klog.Infof("Attempting unmount of [%s]", mountPath)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- gofsutil.Unmount(ctx, mountPath)
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			klog.Infof("Unmount of [%s] succeeded", mountPath)
+			return nil
+		}
+		klog.Warningf("Normal unmount of [%s] failed: [%v]. Falling back to lazy unmount.", mountPath, err)
+	case <-time.After(unmountTimeout):
+		klog.Warningf("Normal unmount of [%s] timed out after %v. Falling back to lazy unmount.", mountPath, unmountTimeout)
+	}
+
+	// Lazy unmount (MNT_DETACH) detaches the mount immediately and cleans up
+	// when the filesystem is no longer busy. It never blocks in D-state.
+	cmd := exec.Command("umount", "-l", mountPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("lazy unmount of [%s] failed: [%v]: %s", mountPath, err, string(out))
+	}
+	klog.Infof("Lazy unmount of [%s] succeeded", mountPath)
+	return nil
+}
+
+// formatAndMountWithTimeout wraps gofsutil.FormatAndMount with a timeout context
+func (ns *nodeService) formatAndMountWithTimeout(ctx context.Context, source, target, fsType string, opts ...string) error {
+	klog.Infof("Attempting format and mount of [%s] to [%s] with timeout %v", source, target, mountTimeout)
+	done := make(chan error, 1)
+	go func() {
+		done <- gofsutil.FormatAndMount(ctx, source, target, fsType, opts...)
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(mountTimeout):
+		klog.Errorf("FormatAndMount of [%s] to [%s] timed out after %v", source, target, mountTimeout)
+		return fmt.Errorf("FormatAndMount of [%s] to [%s] timed out after %v", source, target, mountTimeout)
+	case <-ctx.Done():
+		klog.Errorf("FormatAndMount of [%s] to [%s] context cancelled", source, target)
+		return ctx.Err()
+	}
+}
+
+// bindMountWithTimeout wraps gofsutil.BindMount with a timeout context
+func (ns *nodeService) bindMountWithTimeout(ctx context.Context, source, target string, opts ...string) error {
+	klog.Infof("Attempting bind mount of [%s] to [%s] with timeout %v", source, target, mountTimeout)
+	done := make(chan error, 1)
+	go func() {
+		done <- gofsutil.BindMount(ctx, source, target, opts...)
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(mountTimeout):
+		klog.Errorf("BindMount of [%s] to [%s] timed out after %v", source, target, mountTimeout)
+		return fmt.Errorf("BindMount of [%s] to [%s] timed out after %v", source, target, mountTimeout)
+	case <-ctx.Done():
+		klog.Errorf("BindMount of [%s] to [%s] context cancelled", source, target)
+		return ctx.Err()
+	}
+}
+
