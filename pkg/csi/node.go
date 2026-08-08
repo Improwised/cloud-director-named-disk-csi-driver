@@ -287,6 +287,12 @@ func (ns *nodeService) NodeStageVolumeFilesystemMount(ctx context.Context, volum
 			fmt.Sprintf("unable to format and mount device [%s] at path [%s] with fs [%s] and flags [%v]: [%v]",
 				devicePath, mountDir, fsType, mountFlags, err))
 	}
+
+	// FIX: Prevent 2^12 kernel mount propagation leak for shared volumes
+	if err := exec.Command("mount", "--make-private", mountDir).Run(); err != nil {
+		klog.Errorf("Failed to set mount %s to private propagation: %v", mountDir, err)
+	}
+
 	klog.Infof("Mounted device [%s] at path [%s] with fs [%s] and options [%v]",
 		devicePath, mountDir, fsType, mountFlags)
 
