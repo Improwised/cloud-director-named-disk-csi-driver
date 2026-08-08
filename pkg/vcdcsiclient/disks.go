@@ -346,7 +346,11 @@ func (diskManager *DiskManager) govcdGetDisksByNameOrId(identifier string, vdc *
 		return diskManager.govcdGetDisksByName(identifier, vdc, refresh)
 	}
 	getById := func(id string, refresh bool) (interface{}, error) {
-		return diskManager.govcdGetDiskById(identifier, vdc, refresh)
+		disk, err := diskManager.govcdGetDiskById(identifier, vdc, refresh)
+		if err != nil {
+			return nil, err
+		}
+		return &[]vcdtypes.Disk{*disk}, nil
 	}
 	entity, err := getEntityByNameOrIdSkipNonId(getByName, getById, identifier, refresh)
 	if entity == nil {
