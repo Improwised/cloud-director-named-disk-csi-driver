@@ -375,7 +375,7 @@ func (diskManager *DiskManager) GetDiskByNameOrId(name string, zm *vcdsdk.ZoneMa
 					diskManager.Org.Org.Name, err)
 				continue
 			}
-			disks, err := diskManager.govcdGetDisksByName(name, vdc, true)
+			disks, err := diskManager.govcdGetDisksByNameOrId(name, vdc, true)
 			if err != nil && !errors.Is(err, govcd.ErrorEntityNotFound) {
 				klog.Infof("error looking for disk [%s] in OVDC [%s] of Org [%s]: [%v]",
 					name, ovdcName, diskManager.Org.Org.Name, err)
