@@ -228,6 +228,25 @@ func (diskManager *DiskManager) govcdGetDiskByHref(diskHref string) (*vcdtypes.D
 
 func (diskManager *DiskManager) govcdGetDiskById(diskId string, vdc *govcd.Vdc, refresh bool) (*vcdtypes.Disk, error) {
 	klog.Infof("Get Disk By Id: %s\n", diskId)
+
+	// Direct fetch by UUID/URN to bypass VDC ResourceEntities propagation lag
+	diskUUID := diskId
+	if strings.HasPrefix(diskId, "urn:vcloud:disk:") {
+		diskUUID = strings.TrimPrefix(diskId, "urn:vcloud:disk:")
+	}
+	if govcd.IsUuid(diskUUID) {
+		u := diskManager.VCDClient.VCDClient.Client.VCDHREF
+		u.Path = "/api/disk/" + diskUUID
+		diskHref := u.String()
+		klog.Infof("govcdGetDiskById: attempting direct GET on HREF [%s]", diskHref)
+		disk, err := diskManager.govcdGetDiskByHref(diskHref)
+		if err == nil && disk != nil {
+			klog.Infof("govcdGetDiskById: successfully fetched disk [%s] directly by HREF", diskId)
+			return disk, nil
+		}
+		klog.Warningf("govcdGetDiskById: direct GET failed [%v], falling back to VDC ResourceEntities iteration", err)
+	}
+
 	if refresh {
 		if err := vdc.Refresh(); err != nil {
 			return nil, fmt.Errorf("error when refreshing vdc [%s]: [%v]", vdc.Vdc.Name, err)
