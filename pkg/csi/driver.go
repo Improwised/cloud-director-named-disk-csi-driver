@@ -249,18 +249,13 @@ func (d *VCDDriver) Stop() {
 	}
 }
 
-// Shutdown performs graceful shutdown: stop gRPC server
-func (d *VCDDriver) Shutdown() {
-	klog.Infof("Shutting down CSI driver: stopping server")
-	d.Stop()
-}
-
-// ShutdownOnSignal listens for SIGTERM/SIGINT and exits immediately.
-// We do NOT call d.srv.Stop() here because GracefulStop() blocks waiting for
-// in-flight RPCs to complete. If an RPC is stuck in kernel I/O (e.g. Statfs
-// on a wedged mount), GracefulStop() hangs forever and the process never
-// exits — causing the pod to stick in Terminating. The kernel will close the
-// gRPC socket on process exit, and kubelet will retry interrupted calls.
+// ShutdownOnSignal listens for SIGTERM/SIGINT and exits the process
+// immediately. The node plugin deliberately does not drain in-flight RPCs on
+// shutdown: an RPC may be blocked in uninterruptible kernel I/O (e.g. Statfs
+// on a wedged mount) and cannot be cancelled, so any attempt to stop the gRPC
+// server could still leave the process hanging and the pod stuck in
+// Terminating. os.Exit guarantees the process terminates; the kernel closes
+// the gRPC socket and kubelet retries interrupted calls.
 func (d *VCDDriver) ShutdownOnSignal() {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
