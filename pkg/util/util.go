@@ -9,12 +9,9 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
-
-	"k8s.io/klog"
 )
 
 const (
@@ -67,24 +64,4 @@ func CollectMountOptions(fsType string, mntFlags []string) []string {
 		options = append(options, "nouuid")
 	}
 	return options
-}
-
-// LazyUnmountCSI performs a lazy unmount of all CSI-related mount points to prevent
-// the process from getting stuck in uninterruptible I/O sleep during container shutdown.
-// It uses "umount -l" (MNT_DETACH) which detaches the mount immediately and cleans up
-// when the filesystem is no longer busy.
-func LazyUnmountCSI() error {
-	klog.Infof("Performing lazy unmount of all CSI-related mounts")
-
-	script := `mount 2>/dev/null | grep -E 'kubernetes.io~csi|plugins/kubernetes.io/csi|named-disk.csi.cloud-director' | awk '{print $3}' | xargs -r umount -l 2>/dev/null; mount 2>/dev/null | grep '/var/lib/kubelet/pods/.*/volumes/kubernetes.io~csi' | awk '{print $3}' | xargs -r umount -l 2>/dev/null; true`
-
-	cmd := exec.Command("/bin/sh", "-c", script)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		klog.Warningf("Lazy unmount command had errors: [%v], output: [%s]", err, string(output))
-	} else {
-		klog.Infof("Lazy unmount completed successfully")
-	}
-
-	return nil
 }
