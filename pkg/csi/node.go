@@ -828,13 +828,13 @@ func (ns *nodeService) getDiskPath(ctx context.Context, vmFullName string, diskU
 
 		klog.Infof("Checking file: [%s] => [%s]\n", path, fileToProcess)
 		scsiCtx, scsiCancel := context.WithTimeout(ctx, 3*time.Second)
+		defer scsiCancel()
 		outBytes, err := exec.CommandContext(
 			scsiCtx,
 			"/lib/udev/scsi_id",
 			"--page=0x83",
 			"--whitelisted",
 			fmt.Sprintf("--device=%v", fileToProcess)).CombinedOutput()
-		scsiCancel()
 		if err != nil {
 			klog.Infof("Encountered error while processing file [%s]: [%v]", fileToProcess, err)
 			klog.Infof("Please check if the `disk.enableUUID` parameter is set to 1 for the VM in VC config.")
