@@ -634,40 +634,10 @@ func (ns *nodeService) NodeGetVolumeStats(ctx context.Context,
 		}
 	case <-time.After(5 * time.Second):
 		klog.Warningf("statfs timed out after 5s for volume [%s], returning empty stats", volumePath)
-		return &csi.NodeGetVolumeStatsResponse{
-			Usage: []*csi.VolumeUsage{
-				{
-					Available: 0,
-					Total:     0,
-					Used:      0,
-					Unit:      csi.VolumeUsage_BYTES,
-				},
-				{
-					Available: 0,
-					Total:     0,
-					Used:      0,
-					Unit:      csi.VolumeUsage_INODES,
-				},
-			},
-		}, nil
+		return emptyVolumeStatsResponse(), nil
 	case <-ctx.Done():
 		klog.Warningf("context cancelled for volume [%s], returning empty stats", volumePath)
-		return &csi.NodeGetVolumeStatsResponse{
-			Usage: []*csi.VolumeUsage{
-				{
-					Available: 0,
-					Total:     0,
-					Used:      0,
-					Unit:      csi.VolumeUsage_BYTES,
-				},
-				{
-					Available: 0,
-					Total:     0,
-					Used:      0,
-					Unit:      csi.VolumeUsage_INODES,
-				},
-			},
-		}, nil
+		return emptyVolumeStatsResponse(), nil
 	}
 
 	return &csi.NodeGetVolumeStatsResponse{
@@ -686,6 +656,27 @@ func (ns *nodeService) NodeGetVolumeStats(ctx context.Context,
 			},
 		},
 	}, nil
+}
+
+// emptyVolumeStatsResponse returns a zero-valued stats response used when
+// statfs cannot complete (timeout or cancellation) on a wedged mount.
+func emptyVolumeStatsResponse() *csi.NodeGetVolumeStatsResponse {
+	return &csi.NodeGetVolumeStatsResponse{
+		Usage: []*csi.VolumeUsage{
+			{
+				Available: 0,
+				Total:     0,
+				Used:      0,
+				Unit:      csi.VolumeUsage_BYTES,
+			},
+			{
+				Available: 0,
+				Total:     0,
+				Used:      0,
+				Unit:      csi.VolumeUsage_INODES,
+			},
+		},
+	}
 }
 
 func (ns *nodeService) NodeExpandVolume(ctx context.Context,
