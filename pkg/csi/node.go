@@ -287,9 +287,13 @@ func (ns *nodeService) NodeStageVolumeFilesystemMount(ctx context.Context, volum
 				devicePath, mountDir, fsType, mountFlags, err))
 	}
 
-	// FIX: Prevent 2^12 kernel mount propagation leak for shared volumes
-	if err := exec.Command("mount", "--make-private", mountDir).Run(); err != nil {
-		klog.Errorf("Failed to set mount %s to private propagation: %v", mountDir, err)
+	// Prevent the 2^12 kernel mount propagation leak for shared volumes by
+	// making the staged mount private. Bound the call with a timeout so a
+	// wedged mount binary cannot hang the staging RPC.
+	mkPrivateCtx, cancel := context.WithTimeout(ctx, mountTimeout)
+	defer cancel()
+	if out, err := exec.CommandContext(mkPrivateCtx, "mount", "--make-private", mountDir).CombinedOutput(); err != nil {
+		klog.Errorf("Failed to set mount %s to private propagation: %v: %s", mountDir, err, string(out))
 	}
 
 	klog.Infof("Mounted device [%s] at path [%s] with fs [%s] and options [%v]",
