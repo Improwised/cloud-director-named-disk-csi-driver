@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"time"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -14,10 +13,8 @@ import (
 const (
 	procMountsPath = "/proc/self/mountinfo"
 	// procMountsRetries is number of times to retry for a consistent
-	// read of procMountsPath. Increased from 3 to handle concurrent
-	// mount operations on shared volumes (many pods on one node).
-	procMountsRetries    = 30
-	procMountsRetryDelay = 200 * time.Millisecond
+	// read of procMountsPath.
+	procMountsRetries = 3
 )
 
 var (
@@ -144,11 +141,26 @@ func (fs *FS) bindMount(
 
 // getMounts returns a slice of all the mounted filesystems
 func (fs *FS) getMounts(ctx context.Context) ([]Info, error) {
-	mps, _, err := fs.readProcMounts(ctx, procMountsPath, true)
+
+	_, hash1, err := fs.readProcMounts(ctx, procMountsPath, false)
 	if err != nil {
 		return nil, err
 	}
-	return mps, nil
+
+	for i := 0; i < procMountsRetries; i++ {
+		mps, hash2, err := fs.readProcMounts(ctx, procMountsPath, true)
+		if err != nil {
+			return nil, err
+		}
+		if hash1 == hash2 {
+			// Success
+			return mps, nil
+		}
+		hash1 = hash2
+	}
+	return nil, fmt.Errorf(
+		"failed to get a consistent snapshot of %v after %d tries",
+		procMountsPath, procMountsRetries)
 }
 
 // readProcMounts reads procMountsInfo and produce a hash

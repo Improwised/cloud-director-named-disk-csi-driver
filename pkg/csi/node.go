@@ -53,11 +53,10 @@ const (
 
 	// mountinfoRetries is the number of times to retry mount-info operations
 	// that depend on /proc/self/mountinfo. Under concurrent mount operations
-	// (many pods sharing one volume), the mount table changes faster than a
-	// consistent snapshot can be obtained. This retry count gives the table
-	// time to stabilize.
-	mountinfoRetries     = 10
-	mountinfoRetryDelay  = 500 * time.Millisecond
+	// (many pods sharing one volume), a single read can yield an inconsistent
+	// table. This retry count gives the table time to stabilize.
+	mountinfoRetries    = 10
+	mountinfoRetryDelay = 500 * time.Millisecond
 )
 
 type nodeService struct {
@@ -875,9 +874,11 @@ func (ns *nodeService) isVolumeReadOnly(capability *csi.VolumeCapability) bool {
 		accessMode == csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY
 }
 
-// retryOnMountInfoInconsistency retries the given function when it returns an error
-// containing "failed to get a consistent snapshot". This helps when the mount table
-// is in flux due to concurrent mount operations on shared volumes.
+// retryOnMountInfoInconsistency retries the given function with a short backoff
+// whenever it returns an error. A single read of /proc/self/mountinfo can yield
+// inconsistent output while the mount table is in flux (many pods mounting and
+// unmounting a shared volume on one node), so transient read errors are worth
+// retrying before giving up.
 func retryOnMountInfoInconsistency(fn func() error) error {
 	var lastErr error
 	for i := 0; i < mountinfoRetries; i++ {
@@ -885,11 +886,8 @@ func retryOnMountInfoInconsistency(fn func() error) error {
 		if lastErr == nil {
 			return nil
 		}
-		if strings.Contains(lastErr.Error(), "failed to get a consistent snapshot") {
-			time.Sleep(mountinfoRetryDelay)
-			continue
-		}
-		return lastErr
+		klog.V(4).Infof("mount-info operation failed (attempt %d/%d): %v", i+1, mountinfoRetries, lastErr)
+		time.Sleep(mountinfoRetryDelay)
 	}
 	return lastErr
 }
@@ -1092,4 +1090,3 @@ func (ns *nodeService) bindMountWithTimeout(ctx context.Context, source, target 
 		return ctx.Err()
 	}
 }
-
