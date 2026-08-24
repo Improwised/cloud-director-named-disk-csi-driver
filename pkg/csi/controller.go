@@ -324,8 +324,23 @@ func (cs *controllerServer) ControllerPublishVolume(ctx context.Context,
 			vmName, ovdcIdentifierList, err)
 	}
 
-	klog.Infof("Getting disk details for [%s]", volumeID)
-	disk, err := cs.DiskManager.GetDiskByNameOrId(volumeID, cs.DiskManager.ZoneMap, cs.DiskManager.VCDClient.ClusterOVDCIdentifier)
+	// Prefer the diskID URN from volumeContext (stored by CreateVolume) over the disk name.
+	// On NO_RDE clusters the VDC ResourceEntities list may not reflect newly created disks
+	// immediately when queried by name, but the URN-based lookup always works.
+	diskLookupID := volumeID
+	if diskIDFromCtx, ok := req.GetVolumeContext()[DiskIDAttribute]; ok && diskIDFromCtx != "" {
+		diskLookupID = diskIDFromCtx
+		klog.Infof("ControllerPublishVolume: using diskID [%s] from volumeContext for lookup (volumeID: [%s])",
+			diskLookupID, volumeID)
+	} else {
+		klog.Infof("Getting disk details for [%s] (no diskID in volumeContext, using volumeID)", volumeID)
+	}
+	disk, err := cs.DiskManager.GetDiskByNameOrId(diskLookupID, cs.DiskManager.ZoneMap, cs.DiskManager.VCDClient.ClusterOVDCIdentifier)
+	if err != nil && diskLookupID != volumeID {
+		// Fallback: if URN lookup failed, retry with disk name
+		klog.Warningf("ControllerPublishVolume: diskID URN lookup failed [%v], retrying with volumeID name [%s]", err, volumeID)
+		disk, err = cs.DiskManager.GetDiskByNameOrId(volumeID, cs.DiskManager.ZoneMap, cs.DiskManager.VCDClient.ClusterOVDCIdentifier)
+	}
 	if err != nil {
 		if rdeErr := cs.DiskManager.AddToErrorSet(util.DiskQueryError, "", volumeID,
 			map[string]interface{}{"Detailed Error": fmt.Errorf("unable query disk [%s]: [%v]", volumeID, err)}); rdeErr != nil {

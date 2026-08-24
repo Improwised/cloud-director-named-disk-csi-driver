@@ -1,4 +1,4 @@
-FROM photon:4.0-20240120
+FROM docker.io/library/photon:4.0-20240120
 
 RUN tdnf install -y xfsprogs e2fsprogs udev && \
     tdnf clean all
