@@ -15,8 +15,8 @@ require (
 	github.com/vmware/cloud-provider-for-cloud-director v0.0.0-20240426203125-2d6e9efaf23d
 	github.com/vmware/go-vcloud-director/v2 v2.26.0-alpha.6
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sys v0.43.0
-	google.golang.org/grpc v1.82.1
+	golang.org/x/sys v0.45.0
+	google.golang.org/grpc v1.83.1
 	gopkg.in/yaml.v2 v2.4.0
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.28.4
@@ -78,11 +78,11 @@ require (
 	github.com/sethvargo/go-password v0.2.0 // indirect
 	github.com/sirupsen/logrus v1.8.1 // indirect
 	golang.org/x/exp v0.0.0-20240119083558-1b970713d09a // indirect
-	golang.org/x/net v0.53.0 // indirect
-	golang.org/x/term v0.42.0 // indirect
-	golang.org/x/text v0.36.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
+	golang.org/x/term v0.43.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/time v0.3.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7 // indirect
