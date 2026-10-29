@@ -8,12 +8,15 @@ package csi
 import (
 	"context"
 	"fmt"
+	"net"
+	"os"
+	"os/signal"
+	"syscall"
+
 	"github.com/vmware/cloud-director-named-disk-csi-driver/pkg/util"
 	"github.com/vmware/cloud-director-named-disk-csi-driver/pkg/vcdcsiclient"
 	"github.com/vmware/cloud-director-named-disk-csi-driver/version"
 	"github.com/vmware/cloud-provider-for-cloud-director/pkg/vcdsdk"
-	"net"
-	"os"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc"
@@ -241,5 +244,22 @@ func (d *VCDDriver) Run() error {
 // Stop will stop the grpc server
 func (d *VCDDriver) Stop() {
 	klog.Infof("Stopping server")
-	d.srv.Stop()
+	if d.srv != nil {
+		d.srv.Stop()
+	}
+}
+
+// ShutdownOnSignal listens for SIGTERM/SIGINT and exits the process
+// immediately. The node plugin deliberately does not drain in-flight RPCs on
+// shutdown: an RPC may be blocked in uninterruptible kernel I/O (e.g. Statfs
+// on a wedged mount) and cannot be cancelled, so any attempt to stop the gRPC
+// server could still leave the process hanging and the pod stuck in
+// Terminating. os.Exit guarantees the process terminates; the kernel closes
+// the gRPC socket and kubelet retries interrupted calls.
+func (d *VCDDriver) ShutdownOnSignal() {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
+	sig := <-sigs
+	klog.Infof("Received signal [%v], exiting immediately", sig)
+	os.Exit(0)
 }

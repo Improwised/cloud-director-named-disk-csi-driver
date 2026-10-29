@@ -228,6 +228,25 @@ func (diskManager *DiskManager) govcdGetDiskByHref(diskHref string) (*vcdtypes.D
 
 func (diskManager *DiskManager) govcdGetDiskById(diskId string, vdc *govcd.Vdc, refresh bool) (*vcdtypes.Disk, error) {
 	klog.Infof("Get Disk By Id: %s\n", diskId)
+
+	// Direct fetch by UUID/URN to bypass VDC ResourceEntities propagation lag
+	diskUUID := diskId
+	if strings.HasPrefix(diskId, "urn:vcloud:disk:") {
+		diskUUID = strings.TrimPrefix(diskId, "urn:vcloud:disk:")
+	}
+	if govcd.IsUuid(diskUUID) {
+		u := diskManager.VCDClient.VCDClient.Client.VCDHREF
+		u.Path = "/api/disk/" + diskUUID
+		diskHref := u.String()
+		klog.Infof("govcdGetDiskById: attempting direct GET on HREF [%s]", diskHref)
+		disk, err := diskManager.govcdGetDiskByHref(diskHref)
+		if err == nil && disk != nil {
+			klog.Infof("govcdGetDiskById: successfully fetched disk [%s] directly by HREF", diskId)
+			return disk, nil
+		}
+		klog.Warningf("govcdGetDiskById: direct GET failed [%v], falling back to VDC ResourceEntities iteration", err)
+	}
+
 	if refresh {
 		if err := vdc.Refresh(); err != nil {
 			return nil, fmt.Errorf("error when refreshing vdc [%s]: [%v]", vdc.Vdc.Name, err)
@@ -327,7 +346,11 @@ func (diskManager *DiskManager) govcdGetDisksByNameOrId(identifier string, vdc *
 		return diskManager.govcdGetDisksByName(identifier, vdc, refresh)
 	}
 	getById := func(id string, refresh bool) (interface{}, error) {
-		return diskManager.govcdGetDiskById(identifier, vdc, refresh)
+		disk, err := diskManager.govcdGetDiskById(identifier, vdc, refresh)
+		if err != nil {
+			return nil, err
+		}
+		return &[]vcdtypes.Disk{*disk}, nil
 	}
 	entity, err := getEntityByNameOrIdSkipNonId(getByName, getById, identifier, refresh)
 	if entity == nil {
@@ -356,7 +379,7 @@ func (diskManager *DiskManager) GetDiskByNameOrId(name string, zm *vcdsdk.ZoneMa
 					diskManager.Org.Org.Name, err)
 				continue
 			}
-			disks, err := diskManager.govcdGetDisksByName(name, vdc, true)
+			disks, err := diskManager.govcdGetDisksByNameOrId(name, vdc, true)
 			if err != nil && !errors.Is(err, govcd.ErrorEntityNotFound) {
 				klog.Infof("error looking for disk [%s] in OVDC [%s] of Org [%s]: [%v]",
 					name, ovdcName, diskManager.Org.Org.Name, err)
