@@ -2,6 +2,8 @@ module github.com/vmware/cloud-director-named-disk-csi-driver
 
 go 1.26.0
 
+toolchain go1.26.10
+
 require (
 	github.com/akutz/gofsutil v0.1.2
 	github.com/container-storage-interface/spec v1.4.0
