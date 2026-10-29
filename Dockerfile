@@ -1,4 +1,4 @@
-FROM photon:4.0-20240120
+FROM photon:4.0-20261025
 
 RUN tdnf install -y xfsprogs e2fsprogs udev && \
     tdnf clean all
