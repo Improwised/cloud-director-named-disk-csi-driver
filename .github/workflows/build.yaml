@@ -4,7 +4,8 @@ on:
   push:
     branches:
       - "main"
-      - "fix/mount-point-issue"
+    tags:
+      - "[0-9]*"
   pull_request:
     branches:
       - "main"
@@ -33,27 +34,30 @@ jobs:
           VERSION=$(cat release/version)
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-s -w -X github.com/vmware/cloud-director-named-disk-csi-driver/version.Version=${VERSION}" -o bin/cloud-director-named-disk-csi-driver cmd/csi/main.go
 
+      - name: Compute tag components
+        id: vars
+        run: |
+          echo "short=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to GitHub Container Registry
-        if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
+      - name: Login to Docker Hub
+        if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Docker Meta
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/cloud-director-named-disk-csi-driver
+          images: improwised/cloud-director-named-disk-csi-driver
           tags: |
-            type=ref,event=branch
-            type=ref,event=pr
+            type=raw,value=main-${{ steps.vars.outputs.short }}-${{ steps.vars.outputs.epoch }},enable=${{ github.ref == 'refs/heads/main' }}
             type=semver,pattern={{version}}
-            type=sha,prefix=sha-,format=short
 
       - name: Build and Push Docker Image
         uses: docker/build-push-action@v5
@@ -62,7 +66,7 @@ jobs:
           file: Dockerfile
           build-args: |
             CSI_BUILD_DIR=bin
-          push: ${{ github.ref == 'refs/heads/main' }}
+          push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
